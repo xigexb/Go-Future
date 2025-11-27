@@ -12,13 +12,9 @@ linters:
     - typecheck
     - unused      # 检查未使用的代码
     - gofmt       # 强制格式化
-  disable-all: false
-
-linters-settings:
-  gofmt:
-    simplify: true
 
 issues:
-  exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
+
+version: 1

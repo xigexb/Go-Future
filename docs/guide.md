@@ -25,7 +25,7 @@ package main
 import (
     "fmt"
     "time"
-    "[github.com/xigexb/go-future/future](https://github.com/xigexb/go-future/future)"
+    "github.com/xigexb/go-future/future"
 )
 
 func main() {
@@ -41,7 +41,7 @@ func main() {
     }).ThenAccept(func(s string) {
         fmt.Println(s)
     })
-    
+
     // 3. 阻塞等待结果
     f.Join()
 }
@@ -64,12 +64,12 @@ func main() {
 
 ```go
 // 极快，在回调中直接执行
-f.ThenApply(func(v int) int { return v + 1 }) 
+f.ThenApply(func(v int) int { return v + 1 })
 
 // 提交到池中执行，适合重活
-f.ThenApplyAsync(func(v int) int { 
-    time.Sleep(100 * time.Millisecond) 
-    return v + 1 
+f.ThenApplyAsync(func(v int) int {
+    time.Sleep(100 * time.Millisecond)
+    return v + 1
 })
 ```
 

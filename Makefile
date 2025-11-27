@@ -11,7 +11,7 @@ test:
 
 # 运行基准测试 (你的项目核心)
 bench:
-	go test -bench=. -benchmem ./...
+	go test -bench="." -benchmem ./...
 
 # 代码格式化与检查
 lint:

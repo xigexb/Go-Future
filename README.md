@@ -19,15 +19,19 @@
 
 **Go-Future** brings the powerful, fluent asynchronous programming model of Java's `CompletableFuture` to Go.
 
-While Go's `channel` and `goroutine` are powerful primitives, orchestrating complex asynchronous workflows (DAGs) can still be verbose and error-prone. Go-Future bridges this gap by providing a rich, type-safe, and composable API aligned with **JDK 21/25** standards.
+While Go's `channel` and `goroutine` are powerful primitives, orchestrating complex asynchronous workflows (DAGs) can
+still be verbose and error-prone. Go-Future bridges this gap by providing a rich, type-safe, and composable API aligned
+with **JDK 21/25** standards.
 
 **Go-Future** 将 Java `CompletableFuture` 强大且流畅的异步编程模型带入了 Go 语言。
 
-虽然 Go 的 `channel` 和 `goroutine` 是强大的原语，但在编排复杂的异步工作流（DAG）时，代码往往会变得冗长且容易出错。Go-Future 通过提供一套与 **JDK 21/25** 标准对齐的、类型安全且可组合的 API，填补了这一空白。
+虽然 Go 的 `channel` 和 `goroutine` 是强大的原语，但在编排复杂的异步工作流（DAG）时，代码往往会变得冗长且容易出错。Go-Future
+通过提供一套与 **JDK 21/25** 标准对齐的、类型安全且可组合的 API，填补了这一空白。
 
 ## ✨ Features (特性)
 
-* 🚀 **Full API Parity**: Supports 50+ methods including `SupplyAsync`, `ThenCompose`, `ThenCombine`, `AllOf`, `AnyOf`, `Exceptionally`, `ObtrudeValue`, etc.
+* 🚀 **Full API Parity**: Supports 50+ methods including `SupplyAsync`, `ThenCompose`, `ThenCombine`, `AllOf`, `AnyOf`,
+  `Exceptionally`, `ObtrudeValue`, etc.
     * *完全对齐 Java API，支持 50+ 种方法。*
 * ⚡ **High Performance**: Built on `sync/atomic` for lock-free state checks. The overhead is sub-microsecond (~400ns).
     * *高性能：基于原子操作的状态管理，额外开销仅为亚微秒级。*
@@ -41,7 +45,7 @@ While Go's `channel` and `goroutine` are powerful primitives, orchestrating comp
 ## 🛠️ Installation (安装)
 
 ```bash
-go get https://github.com/xigexb/go-future
+go get github.com/xigexb/go-future
 ```
 
 ## 🚀 Quick Start (快速开始)
@@ -85,11 +89,11 @@ defer cancel()
 
 // Support Context for tracing/cancellation
 // 支持 Context 用于链路追踪或取消
-future.SupplyAsyncCtx(ctx, func() string {
-    // do something heavy
-    return "ok"
-}).ThenAccept(func(s string) {
-    fmt.Println(s)
+future.SupplyAsyncCtx(ctx, func () string {
+// do something heavy
+return "ok"
+}).ThenAccept(func (s string) {
+fmt.Println(s)
 }).Join()
 ```
 
@@ -103,13 +107,14 @@ For detailed usage, patterns, and best practices, please refer to the Guide:
 
 Environment: Intel i9-11900KF @ 3.50GHz, Go 1.20, Windows.
 
-| Benchmark Case | Time/Op | Alloc/Op | Description |
-| :--- | :--- | :--- | :--- |
-| **Native Goroutine** | ~69 ns | 32 B | Baseline (Physical limit of Go) |
-| **Future SupplyAsync** | **~399 ns** | 408 B | Includes pool scheduling & context init |
-| **Future Chaining** | **~506 ns** | 840 B | Full async callback execution |
+| Benchmark Case         | Time/Op     | Alloc/Op | Description                             |
+|:-----------------------|:------------|:---------|:----------------------------------------|
+| **Native Goroutine**   | ~69 ns      | 32 B     | Baseline (Physical limit of Go)         |
+| **Future SupplyAsync** | **~399 ns** | 408 B    | Includes pool scheduling & context init |
+| **Future Chaining**    | **~506 ns** | 840 B    | Full async callback execution           |
 
-> **Conclusion**: The overhead introduced by Go-Future is negligible (**< 0.4µs**) compared to typical I/O operations (ms level).
+> **Conclusion**: The overhead introduced by Go-Future is negligible (**< 0.4µs**) compared to typical I/O operations (
+> ms level).
 >
 > **结论**: 相比原生协程，本库带来的额外开销极低（小于 0.4 微秒），在实际业务中可忽略不计。
 
@@ -121,4 +126,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## 📄 License
 
-MIT © [xigexb](https://github.com/xigexb)
+MIT © [xigexb](https://github.com/xigexb) [website](https://www.xigexb.com)
