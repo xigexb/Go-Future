@@ -1,0 +1,36 @@
+name: Benchmark
+
+on:
+  # 允许手动在 GitHub 页面点击触发
+  workflow_dispatch:
+  # 当代码合并到主分支时自动触发
+  push:
+    branches: [ "main", "master" ]
+    paths-ignore:
+      - '**.md' # 忽略文档修改
+
+jobs:
+  benchmark:
+    name: Run Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Run Benchmark
+        # 运行所有基准测试，显示内存分配 (-benchmem)
+        run: |
+          echo "Starting Benchmark..."
+          go test -bench="." -benchmem -run=^$ ./... | tee benchmark_result.txt
+
+      # 可选：将结果作为 Artifact 保存，方便下载查看
+      - name: Upload Benchmark Result
+        uses: actions/upload-artifact@v3
+        with:
+          name: benchmark-result
+          path: benchmark_result.txt

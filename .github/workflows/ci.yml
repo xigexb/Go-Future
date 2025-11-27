@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  test:
+    name: Test (Go ${{ matrix.go-version }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 测试多个 Go 版本，确保泛型兼容性 (1.18+)
+        go-version: [ '1.18', '1.21', '1.22','1.23','1.24','1.25' ]
+        # 跨平台测试
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Run Tests with Race Detector
+        # -race 是关键，用于检测并发读写冲突
+        run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+
+      # 可选：上传覆盖率报告到 Codecov (如果你有配置的话)
+      # - name: Upload coverage to Codecov
+      #   uses: codecov/codecov-action@v3
+      #   with:
+      #     file: ./coverage.txt
