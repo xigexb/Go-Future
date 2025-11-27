@@ -20,10 +20,9 @@
 - **高性能**: 链式调用开销仅 **~400ns** (比原生 Goroutine 仅多 0.3µs)。
 - **生产级防护**: 内置基于信号量的协程池，支持 `Panic` 自动捕获。
 
-## 🚀 快速开始[
-]()
+## 🚀 快速开始
 ```bash
-go get [github.com/xigexb/go-future](https://github.com/xigexb/go-future)
+go get github.com/xigexb/go-future
 ```
 
 ```go
@@ -31,18 +30,18 @@ package main
 
 import (
     "fmt"
-    "[github.com/xigexb/go-future/future](https://github.com/xigexb/go-future/future)"
+    "github.com/xigexb/go-future/future"
 )
 
 func main() {
     // 1. 异步任务
     f1 := future.SupplyAsync(func() int { return 10 })
-    
+
     // 2. 异步链式 (Async 提交到协程池)
     f2 := future.ThenApplyAsync(f1, func(v int) int {
         return v * 2
     })
-    
+
     // 3. 阻塞获取
     val, err := f2.Join()
     if err != nil {
