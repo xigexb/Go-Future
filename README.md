@@ -1,7 +1,7 @@
 # Go-Future ⚡
 
 <p align="center">
-  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.18+-blue.svg?style=flat-square" alt="Go Version"></a>
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.21+-blue.svg?style=flat-square" alt="Go Version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="License"></a>
   <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/CompletableFuture.html"><img src="https://img.shields.io/badge/API-Java%2021%2F25-orange.svg?style=flat-square" alt="Java Parity"></a>
   <a href="#"><img src="https://img.shields.io/badge/coverage-95%25-brightgreen.svg?style=flat-square" alt="Coverage"></a>
@@ -33,7 +33,7 @@ with **JDK 21/25** standards.
 * 🚀 **Full API Parity**: Supports 50+ methods including `SupplyAsync`, `ThenCompose`, `ThenCombine`, `AllOf`, `AnyOf`,
   `Exceptionally`, `ObtrudeValue`, etc.
     * *完全对齐 Java API，支持 50+ 种方法。*
-* ⚡ **High Performance**: Built on `sync/atomic` for lock-free state checks. The overhead is sub-microsecond (~400ns).
+* ⚡ **High Performance**: Built on `sync/atomic` for lock-free state checks. The overhead is sub-microsecond (~370ns).
     * *高性能：基于原子操作的状态管理，额外开销仅为亚微秒级。*
 * 🛡️ **Production Ready**: Built-in **Goroutine Pool** (Backpressure protection) and **Panic Recovery**.
     * *生产就绪：内置协程池防止资源耗尽，自动捕获 Panic。*
@@ -52,6 +52,13 @@ go get github.com/xigexb/go-future
 
 ### Basic Usage (基础用法)
 
+> **Note on Generics**: Due to Go's limitation that methods cannot have type parameters, functions that change types (
+> like `ThenApply` or `ThenCompose`) are implemented as standalone functions, while others (like `ThenAccept` or
+`Exceptionally`) are methods.
+>
+> **注意**：由于 Go 方法不支持额外的泛型参数，凡是涉及类型转换的操作（如 `ThenApply`）均为**函数**，而不改变类型的操作（如
+`ThenAccept`）均为**方法**。
+
 ```go
 package main
 
@@ -61,23 +68,25 @@ import (
 )
 
 func main() {
-    // 1. Async execution
+    // 1. Async execution (Start with int)
     // 1. 异步执行
     f := future.SupplyAsync(func() int {
         return 10
     })
 
-    // 2. Chaining transformations
+    // 2. Chaining transformations (int -> string)
+    // Use function for type conversion: future.ThenApply(f, ...)
     // 2. 链式转换
-    f.ThenApply(func(v int) string {
+    f2 := future.ThenApply(f, func(v int) string {
         return fmt.Sprintf("Result: %d", v*2)
-    }).ThenAccept(func(s string) {
-        fmt.Println(s) // Output: Result: 20
     })
 
-    // 3. Block and wait
-    // 3. 阻塞等待
-    f.Join()
+    // 3. Consumption (string -> void)
+    // Method chaining works here
+    // 3. 结果消费
+    f2.ThenAccept(func(s string) {
+        fmt.Println(s) // Output: Result: 20
+    }).Join()
 }
 ```
 
@@ -105,13 +114,13 @@ For detailed usage, patterns, and best practices, please refer to the Guide:
 
 ## 📊 Benchmarks (基准测试)
 
-Environment: Intel i9-11900KF @ 3.50GHz, Go 1.20, Windows.
+Environment: Intel i9-11900KF @ 3.50GHz, Windows, Go 1.20+.
 
 | Benchmark Case         | Time/Op     | Alloc/Op | Description                             |
 |:-----------------------|:------------|:---------|:----------------------------------------|
-| **Native Goroutine**   | ~69 ns      | 32 B     | Baseline (Physical limit of Go)         |
-| **Future SupplyAsync** | **~399 ns** | 408 B    | Includes pool scheduling & context init |
-| **Future Chaining**    | **~506 ns** | 840 B    | Full async callback execution           |
+| **Native Goroutine**   | ~70 ns      | 32 B     | Baseline (Physical limit of Go)         |
+| **Future SupplyAsync** | **~372 ns** | 359 B    | Includes pool scheduling & context init |
+| **Future Parallel**    | **~379 ns** | 359 B    | Parallel execution overhead             |
 
 > **Conclusion**: The overhead introduced by Go-Future is negligible (**< 0.4µs**) compared to typical I/O operations (
 > ms level).
@@ -126,4 +135,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## 📄 License
 
-MIT © [xigexb](https://github.com/xigexb) [website](https://www.xigexb.com)
+MIT © [xigexb](https://github.com/xigexb)

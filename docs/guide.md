@@ -1,201 +1,386 @@
-# Go-Future 深度使用指南 🚀
+# Go-Future Guide
 
-欢迎使用 **Go-Future**！这是一个完全对齐 **JDK 21/25** 标准的 `CompletableFuture` 实现。
+> A complete, accurate usage guide for `github.com/xigexb/go-future`.
 
-它利用 Go 1.18+ 泛型，提供了**类型安全**、**高性能**（亚微秒级开销）的异步编程体验。
+This document covers **all public APIs**, their semantics, and real-world usage
+patterns. The behavior is intentionally aligned with **Java CompletableFuture (JDK 21/25)**, adapted to Go idioms.
 
----
+**Important Note on Syntax**:
 
-## 目录
-
-1. [快速开始](#1-快速开始)
-2. [同步 vs 异步 (Sync vs Async)](#2-同步-vs-异步-sync-vs-async)
-3. [链式转换](#3-链式转换-mapflatmap)
-4. [组合任务 (And/Or/All)](#4-组合任务-andorall)
-5. [异常处理](#5-异常处理)
-6. [高级控制 (GetNow/Obtrude)](#6-高级控制)
+- **Functions (`future.Func(f, ...)`)**: Used when the operation changes the generic type (e.g., `T` -> `V`). Go methods
+  do not support new type parameters.
+- **Methods (`f.Method(...)`)**: Used when the operation maintains the same type `T` or returns a fixed type (like
+  `struct{}`).
 
 ---
 
-## 1. 快速开始
+## 1. Creating Futures
+
+### 1.1 SupplyAsync (with result)
+
+```go
+f := future.SupplyAsync(func () int {
+return 42
+})
+```
+
+With `context.Context`:
+
+```go
+ctx := context.Background()
+f := future.SupplyAsyncCtx(ctx, func () string {
+return "ok"
+})
+```
+
+With custom executor:
+
+```go
+f := future.SupplyAsyncWithExecutor(exec, func () int {
+return 100
+})
+```
+
+---
+
+### 1.2 RunAsync (no result)
+
+Returns `*CompletableFuture[struct{}]`.
+
+```go
+future.RunAsync(func () {
+fmt.Println("side effect")
+})
+```
+
+---
+
+### 1.3 Pre-completed futures
+
+```go
+f1 := future.CompletedFuture(1)
+f2 := future.FailedFuture[int](errors.New("failed"))
+```
+
+---
+
+## 2. Waiting for Results
+
+### 2.1 Join (blocking)
+
+Blocks until done. Returns value and error.
+
+```go
+value, err := f.Join()
+```
+
+### 2.2 Get (context-aware)
+
+Waits with a context (timeout/cancel).
+
+```go
+value, err := f.Get(ctx)
+```
+
+### 2.3 Non-blocking access
+
+```go
+value, err := f.GetNow(-1) // Returns default if not done
+```
+
+```go
+value := f.ResultNow() // Panics if not completed or exceptional
+err := f.ExceptionNow() // Panics if completed normally
+```
+
+---
+
+## 3. Transformations (Chaining)
+
+### 3.1 ThenApply (Map)
+
+**Type:** Function
+**Signature:** `T -> V`
+
+```go
+f1 := future.SupplyAsync(func () int {
+return 10
+})
+
+// Correct: Use function call for type change
+f2 := future.ThenApply(f1, func (v int) string {
+return fmt.Sprintf("Value: %d", v * 2)
+})
+```
+
+Async variants:
+
+```go
+future.ThenApplyAsync(f, fn)
+future.ThenApplyAsyncWithExecutor(f, exec, fn)
+```
+
+---
+
+### 3.2 ThenAccept (Consumer)
+
+**Type:** Method
+**Signature:** `T -> void`
+
+```go
+f.ThenAccept(func (v int) {
+fmt.Println(v)
+})
+```
+
+---
+
+### 3.3 ThenRun (Runnable)
+
+**Type:** Method
+**Signature:** `void -> void`
+
+```go
+f.ThenRun(func () {
+fmt.Println("done")
+})
+```
+
+---
+
+## 4. ThenCompose (FlatMap)
+
+Used when the mapping function itself returns a Future.
+
+**Type:** Function
+
+```go
+f := future.SupplyAsync(func () int {
+return 1
+})
+
+// f is *CompletableFuture[int]
+// Result is *CompletableFuture[string]
+f2 := future.ThenCompose(f, func (v int) *future.CompletableFuture[string] {
+// Return a new Future
+return future.SupplyAsync(func () string {
+return fmt.Sprintf("order-%d", v)
+})
+})
+```
+
+---
+
+## 5. WhenComplete
+
+Observe completion without changing the result.
+
+**Type:** Method
+
+```go
+f.WhenComplete(func (v int, err error) {
+if err != nil {
+log.Println("failed:", err)
+}
+})
+```
+
+---
+
+## 6. Exception Handling
+
+### 6.1 Exceptionally (Recover)
+
+Recovers from an error by returning a fallback value.
+
+**Type:** Method
+
+```go
+future.SupplyAsync(func () int {
+panic("db down")
+}).Exceptionally(func (err error) (int, error) {
+return -1, nil // Fallback value
+})
+```
+
+---
+
+### 6.2 ExceptionallyCompose
+
+Recovers by returning a new Future (fallback via async operation).
+
+**Type:** Method
+
+```go
+f.ExceptionallyCompose(func (err error) *future.CompletableFuture[int] {
+return future.SupplyAsync(func () int {
+return 0 // Async fallback
+})
+})
+```
+
+---
+
+### 6.3 Handle
+
+Always executes regardless of success or failure.
+
+**Type:** Method (Note: In this Go implementation, `Handle` does not change the type `T`)
+
+```go
+f.Handle(func (v int, err error) int {
+if err != nil {
+return -1 // Recover
+}
+return v // Pass through
+})
+```
+
+---
+
+## 7. Multiple Futures
+
+### 7.1 AllOf (Void)
+
+Waits for all futures to complete. Fail-fast if any fails.
+
+```go
+future.AllOf(f1, f2, f3).Join()
+```
+
+---
+
+### 7.2 AnyOf (Race)
+
+Returns the result of the first future to complete.
+
+```go
+vFuture := future.AnyOf(f1, f2) // Returns *CompletableFuture[T]
+v, err := vFuture.Join()
+```
+
+---
+
+## 8. Binary Combinators
+
+### 8.1 ThenCombine (AND)
+
+Combines results of two independent futures.
+
+**Type:** Function
+
+```go
+f3 := future.ThenCombine(f1, f2, func (a int, b int) int {
+return a + b
+})
+```
+
+---
+
+### 8.2 ApplyToEither (OR)
+
+Takes the result of whichever future finishes first.
+
+**Type:** Function
+
+```go
+f3 := future.ApplyToEither(f1, f2, func (v int) string {
+return fmt.Sprintf("winner: %d", v)
+})
+```
+
+---
+
+## 9. Timeout Control
+
+### 9.1 OrTimeout
+
+**Type:** Method
+
+```go
+f.OrTimeout(50 * time.Millisecond)
+```
+
+Returns `ErrTimeout` if triggered.
+
+---
+
+### 9.2 CompleteOnTimeout
+
+**Type:** Method
+
+```go
+f.CompleteOnTimeout(-1, 50*time.Millisecond)
+```
+
+---
+
+## 10. Executors & Thread Pools
+
+### 10.1 Global Executor
+
+By default, async methods use a global `BlockingExecutor` (Limit = CPU * 2).
+
+```go
+future.SupplyAsync(fn)
+```
+
+### 10.2 Custom Executor
+
+Pass a custom executor (implementing `Submit(func())`) to control concurrency.
+
+```go
+exec := pool.NewBlockingExecutor(8)
+future.SupplyAsyncWithExecutor(exec, fn)
+```
+
+### 10.3 Replace Global Executor
+
+You can replace the default pool at application startup:
+
+```go
+pool.SetGlobalExecutor(myCustomPool)
+```
+
+---
+
+## 11. Full Example
 
 ```go
 package main
 
 import (
     "fmt"
-    "time"
     "github.com/xigexb/go-future/future"
 )
 
 func main() {
-    // 1. 开启异步任务
-    f := future.SupplyAsync(func() int {
-        // 模拟耗时任务
-        return 100
+    // 1. Start Async Task
+    f1 := future.SupplyAsync(func() int {
+        return 10
     })
 
-    // 2. 链式处理
-    f.ThenApply(func(v int) string {
-        return fmt.Sprintf("Result: %d", v)
-    }).ThenAccept(func(s string) {
-        fmt.Println(s)
+    // 2. Transform (int -> int) using ThenApply (Function)
+    f2 := future.ThenApply(f1, func(v int) int {
+        return v * 10
     })
 
-    // 3. 阻塞等待结果
-    f.Join()
+    // 3. Compose (int -> string) using ThenCompose (Function)
+    f3 := future.ThenCompose(f2, func(v int) *future.CompletableFuture[string] {
+        return future.SupplyAsync(func() string {
+            return fmt.Sprintf("Order: %d Shipped", v)
+        })
+    })
+
+    // 4. Handle Errors & Consume (Methods)
+    f3.Exceptionally(func(err error) (string, error) {
+        return "Fallback Order", nil
+    }).ThenAccept(func(msg string) {
+        fmt.Println(msg)
+    }).Join()
 }
 ```
 
 ---
 
-## 2. 同步 vs 异步 (Sync vs Async)
-
-这是本库与 Java 标准对齐的核心特性。大多数方法都有两个版本：
-
-* **默认版本 (如 `ThenApply`)**:
-    * 在**上一个任务完成的线程（Goroutine）**中立即执行。
-    * **优点**: 性能极高（无调度开销），适合轻量级转换（如数据计算、字段提取）。
-    * **注意**: 避免在里面做阻塞操作，否则会卡住回调链。
-
-* **Async 版本 (如 `ThenApplyAsync`)**:
-    * 将任务提交到**全局协程池**中执行。
-    * **优点**: 适合耗时操作（I/O、复杂计算），防止阻塞主链路。
-
-```go
-// 极快，在回调中直接执行
-f.ThenApply(func(v int) int { return v + 1 })
-
-// 提交到池中执行，适合重活
-f.ThenApplyAsync(func(v int) int {
-    time.Sleep(100 * time.Millisecond)
-    return v + 1
-})
-```
-
----
-
-## 3. 链式转换 (Map/FlatMap)
-
-### 3.1 ThenApply (一对一转换)
-*对应 Java `thenApply`*。
-
-```go
-f1 := future.SupplyAsync(func() int { return 10 })
-
-// int -> string
-// 注意：Go 泛型限制，类型转换需使用顶层函数 future.ThenApply
-f2 := future.ThenApply(f1, func(v int) string {
-    return fmt.Sprintf("ID: %d", v)
-})
-```
-
-### 3.2 ThenCompose (扁平化转换)
-*对应 Java `thenCompose`*。当你的回调函数也返回一个 Future 时使用。
-
-```go
-future.ThenCompose(f1, func(id int) *future.CompletableFuture[string] {
-    // 返回一个新的异步任务
-    return future.SupplyAsync(func() string {
-        return getUserById(id)
-    })
-})
-```
-
----
-
-## 4. 组合任务 (And/Or/All)
-
-### 4.1 AllOf (等待所有)
-等待所有任务完成。**Fail-Fast 机制**：只要有一个失败，整体立即失败。
-
-```go
-f1 := future.SupplyAsync(task1)
-f2 := future.SupplyAsync(task2)
-
-future.AllOf(f1, f2).Join()
-```
-
-### 4.2 AnyOf (任意一个)
-谁先结束（无论成败），就返回谁的结果。
-
-```go
-future.AnyOf(f1, f2).ThenAccept(func(v any) {
-    fmt.Println("First result:", v)
-})
-```
-
-### 4.3 ThenCombine (两个都完成)
-*对应 Java `thenCombine`*。等待 A 和 B 都完成，合并计算结果。
-
-```go
-future.ThenCombine(f1, f2, func(a int, b int) int {
-    return a + b
-})
-```
-
-### 4.4 ApplyToEither (两个竞速)
-*对应 Java `applyToEither`*。A 或 B 谁先成功，就用谁的结果进行转换。
-
-```go
-future.ApplyToEither(f1, f2, func(v int) string {
-    return "Winner: " + strconv.Itoa(v)
-})
-```
-
----
-
-## 5. 异常处理
-
-本库支持更符合 Go 习惯的错误处理（支持返回 error）。
-
-### 5.1 Exceptionally (捕获并恢复)
-
-```go
-f.Exceptionally(func(err error) (int, error) {
-    if isRecoverable(err) {
-        return 0, nil // 吞掉错误，返回默认值 0
-    }
-    return 0, err // 无法恢复，继续抛出错误
-})
-```
-
-### 5.2 Handle (无论成败)
-类似 `finally`，同时获取结果和错误。
-
-```go
-f.Handle(func(val int, err error) int {
-    if err != nil {
-        return -1
-    }
-    return val
-})
-```
-
----
-
-## 6. 高级控制
-
-### 6.1 ResultNow / ExceptionNow (Java 19+)
-如果你确定任务已完成，可以非阻塞地直接拿结果。如果没完成会 Panic。
-
-```go
-if f.IsDone() {
-    val := f.ResultNow() // 直接取值
-    fmt.Println(val)
-}
-```
-
-### 6.2 GetNow
-尝试立即获取，没完成则返回默认值。
-
-```go
-val, _ := f.GetNow(999) // 如果没做完，返回 999
-```
-
-### 6.3 Obtrude (强制写入)
-强制修改 Future 的结果（即使它已经完成了）。常用于测试或故障恢复。
-
-```go
-f.ObtrudeValue(100) // 强行把结果改为 100
-```
+End of guide.
