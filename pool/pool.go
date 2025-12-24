@@ -10,18 +10,18 @@ import (
 type Runnable func()
 
 // Executor 执行器接口
+// 任何实现了 Submit 方法的结构体都可以作为协程池使用 (如 ants)
 type Executor interface {
 	Submit(task Runnable)
 }
 
-// blockingExecutor 限制并发数的执行器
-type blockingExecutor struct {
-	sem  chan struct{} // 信号量
-	wait sync.WaitGroup
-}
-
 // GlobalExecutor 全局默认执行器
 var GlobalExecutor Executor
+
+// SetGlobalExecutor 允许用户在 main 函数初始化时替换默认池
+func SetGlobalExecutor(e Executor) {
+	GlobalExecutor = e
+}
 
 func init() {
 	// 默认并发数为 CPU 核心数 * 2，模拟 Java ForkJoinPool.commonPool
@@ -39,9 +39,14 @@ func NewBlockingExecutor(limit int) Executor {
 	}
 }
 
+// blockingExecutor 限制并发数的简单实现
+type blockingExecutor struct {
+	sem  chan struct{} // 信号量
+	wait sync.WaitGroup
+}
+
 func (e *blockingExecutor) Submit(task Runnable) {
 	// 获取信号量，如果满了会阻塞，起到背压作用
-	// 在生产环境中，也可以改为非阻塞丢弃或入队，这里为了可靠性选择阻塞等待资源
 	e.sem <- struct{}{}
 	go func() {
 		defer func() {
@@ -54,7 +59,7 @@ func (e *blockingExecutor) Submit(task Runnable) {
 	}()
 }
 
-// DirectExecutor 直接在当前 goroutine 或新 goroutine 执行，不限制（用于测试或极轻量任务）
+// DirectExecutor 直接在当前 goroutine 或新 goroutine 执行
 type DirectExecutor struct{}
 
 func (d *DirectExecutor) Submit(task Runnable) {

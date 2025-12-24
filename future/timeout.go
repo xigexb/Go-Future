@@ -1,76 +1,42 @@
 package future
 
 import (
-	"sync/atomic"
 	"time"
 )
 
-// OrTimeout 对应 Java 9: orTimeout
+// OrTimeout 如果在指定时间内未完成，则抛出 ErrTimeout 异常
 func (f *CompletableFuture[T]) OrTimeout(d time.Duration) *CompletableFuture[T] {
-	go func() {
-		select {
-		case <-time.After(d):
-			// 1. 优化：先做一次无锁检查
-			if f.IsDone() {
-				return
-			}
-
-			f.mu.Lock()
-			// 2. 锁内再次检查状态 (使用 state 代替 isDone)
-			if f.state != stateDone {
-				f.mu.Unlock()
-				// 解锁后调用，CompleteExceptionally 内部有原子 CAS 检查，是安全的
-				f.CompleteExceptionally(ErrTimeout)
-			} else {
-				f.mu.Unlock()
-			}
-		case <-f.doneChan:
-		}
-	}()
-	return f
-}
-
-// CompleteOnTimeout 对应 Java 9: completeOnTimeout
-func (f *CompletableFuture[T]) CompleteOnTimeout(value T, d time.Duration) *CompletableFuture[T] {
-	go func() {
-		select {
-		case <-time.After(d):
-			f.Complete(value)
-		case <-f.doneChan:
-		}
-	}()
-	return f
-}
-
-// Cancel 对应 Java: cancel(boolean)
-func (f *CompletableFuture[T]) Cancel(mayInterruptIfRunning bool) bool {
-	// 1. 快速检查
 	if f.IsDone() {
-		return false
+		return f
 	}
 
-	f.mu.Lock()
-	// 2. 锁内检查 (使用 state 代替 isDone)
-	if f.state == stateDone {
-		f.mu.Unlock()
-		return false
+	go func() {
+		select {
+		case <-time.After(d):
+			// 尝试以超时失败结束
+			// 利用 CAS 机制保证线程安全，无需手动加锁
+			f.CompleteExceptionally(ErrTimeout)
+		case <-f.getDoneChanLazy():
+			// 任务在超时前已完成，无需操作
+		}
+	}()
+	return f
+}
+
+// CompleteOnTimeout 如果在指定时间内未完成，则使用给定的默认值完成
+func (f *CompletableFuture[T]) CompleteOnTimeout(value T, d time.Duration) *CompletableFuture[T] {
+	if f.IsDone() {
+		return f
 	}
 
-	// 3. 修改状态
-	atomic.StoreInt32(&f.state, stateDone)
-	f.err = ErrCanceled
-	close(f.doneChan)
-	cbs := f.callbacks
-	f.callbacks = nil
-	f.mu.Unlock()
-
-	// 4. 触发 Context 取消 (级联取消)
-	f.cancel()
-
-	// 5. 触发回调
-	var zero T
-	for _, cb := range cbs {
-		cb(zero, ErrCanceled)
-	}
-	return true
+	go func() {
+		select {
+		case <-time.After(d):
+			// 尝试写入默认值
+			f.Complete(value)
+		case <-f.getDoneChanLazy():
+			// 任务在超时前已完成
+		}
+	}()
+	return f
 }

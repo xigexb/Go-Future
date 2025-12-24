@@ -6,21 +6,34 @@ import (
 	"github.com/xigexb/go-future/pool"
 )
 
-// SupplyAsync 对应 Java: supplyAsync
+// ============ SupplyAsync (有返回值) ============
+
 func SupplyAsync[T any](supplier func() T) *CompletableFuture[T] {
-	return SupplyAsyncCtx(context.Background(), supplier)
+	return SupplyAsyncCtxWithExecutor(context.Background(), nil, supplier)
 }
 
-// SupplyAsyncCtx 支持 Context 传递（Go 特有优化）
-// 允许任务感知上游的取消信号 (TraceID, Timeout 等)
 func SupplyAsyncCtx[T any](ctx context.Context, supplier func() T) *CompletableFuture[T] {
+	return SupplyAsyncCtxWithExecutor(ctx, nil, supplier)
+}
+
+func SupplyAsyncWithExecutor[T any](executor pool.Executor, supplier func() T) *CompletableFuture[T] {
+	return SupplyAsyncCtxWithExecutor(context.Background(), executor, supplier)
+}
+
+func SupplyAsyncCtxWithExecutor[T any](ctx context.Context, executor pool.Executor, supplier func() T) *CompletableFuture[T] {
+	// 自动创建，无需 Pool 复用逻辑
 	f := NewWithContext[T](ctx)
 	if supplier == nil {
 		f.CompleteExceptionally(ErrNilFunction)
 		return f
 	}
-	pool.GlobalExecutor.Submit(func() {
-		// 任务开始前先检查上下文状态
+
+	exec := executor
+	if exec == nil {
+		exec = pool.GlobalExecutor
+	}
+
+	exec.Submit(func() {
 		if ctx.Err() != nil {
 			f.CompleteExceptionally(ctx.Err())
 			return
@@ -35,19 +48,33 @@ func SupplyAsyncCtx[T any](ctx context.Context, supplier func() T) *CompletableF
 	return f
 }
 
-// RunAsync 对应 Java: runAsync
+// ============ RunAsync (无返回值) ============
+
 func RunAsync(runnable func()) *CompletableFuture[struct{}] {
-	return RunAsyncCtx(context.Background(), runnable)
+	return RunAsyncCtxWithExecutor(context.Background(), nil, runnable)
 }
 
-// RunAsyncCtx 支持 Context 传递
 func RunAsyncCtx(ctx context.Context, runnable func()) *CompletableFuture[struct{}] {
+	return RunAsyncCtxWithExecutor(ctx, nil, runnable)
+}
+
+func RunAsyncWithExecutor(executor pool.Executor, runnable func()) *CompletableFuture[struct{}] {
+	return RunAsyncCtxWithExecutor(context.Background(), executor, runnable)
+}
+
+func RunAsyncCtxWithExecutor(ctx context.Context, executor pool.Executor, runnable func()) *CompletableFuture[struct{}] {
 	f := NewWithContext[struct{}](ctx)
 	if runnable == nil {
 		f.CompleteExceptionally(ErrNilFunction)
 		return f
 	}
-	pool.GlobalExecutor.Submit(func() {
+
+	exec := executor
+	if exec == nil {
+		exec = pool.GlobalExecutor
+	}
+
+	exec.Submit(func() {
 		if ctx.Err() != nil {
 			f.CompleteExceptionally(ctx.Err())
 			return
@@ -65,14 +92,12 @@ func RunAsyncCtx(ctx context.Context, runnable func()) *CompletableFuture[struct
 	return f
 }
 
-// CompletedFuture 对应 Java: completedFuture
 func CompletedFuture[T any](val T) *CompletableFuture[T] {
 	f := New[T]()
 	f.Complete(val)
 	return f
 }
 
-// FailedFuture 对应 Java 9: failedFuture
 func FailedFuture[T any](err error) *CompletableFuture[T] {
 	f := New[T]()
 	f.CompleteExceptionally(err)

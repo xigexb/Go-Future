@@ -14,50 +14,63 @@ var (
 	ErrCanceled    = errors.New("completable future canceled")
 	ErrTimeout     = errors.New("completable future timed out")
 	ErrNilFunction = errors.New("function cannot be nil")
-	ErrNoResult    = errors.New("future not completed")
 )
 
-// 状态常量 (用于原子操作)
 const (
-	statePending = 0
-	stateDone    = 1
+	statePending    int32 = 0
+	stateCompleting int32 = 1
+	stateDone       int32 = 2
 )
 
-// Callback 内部回调链节点
-type callback[T any] func(val T, err error)
+// 全局复用的已关闭 Channel (Zero Alloc 的关键)
+var closedChan = make(chan struct{})
 
-// CompletableFuture 核心结构
-type CompletableFuture[T any] struct {
-	value     T
-	err       error
-	state     int32 // 原子状态标记 (0: Pending, 1: Done)
-	mu        sync.Mutex
-	doneChan  chan struct{}
-	callbacks []callback[T]
-	ctx       context.Context
-	cancel    context.CancelFunc
+func init() {
+	close(closedChan)
 }
 
-// New 创建
+type callback[T any] func(val T, err error)
+
+type CompletableFuture[T any] struct {
+	state int32
+
+	value T
+	err   error
+
+	mu sync.Mutex
+
+	cb0 callback[T]
+	cbs []callback[T]
+
+	doneChan chan struct{}
+
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	_ [8]uint64
+}
+
 func New[T any]() *CompletableFuture[T] {
 	return NewWithContext[T](context.Background())
 }
 
-// NewWithContext 使用父 Context 创建 Future (支持链路追踪/级联取消)
 func NewWithContext[T any](parent context.Context) *CompletableFuture[T] {
-	ctx, cancel := context.WithCancel(parent)
-	return &CompletableFuture[T]{
-		state:     statePending,
-		doneChan:  make(chan struct{}),
-		callbacks: make([]callback[T], 0, 4),
-		ctx:       ctx,
-		cancel:    cancel,
+	f := &CompletableFuture[T]{
+		state: statePending,
 	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	if parent.Done() == nil {
+		f.ctx = parent
+	} else {
+		f.ctx, f.cancel = context.WithCancel(parent)
+	}
+	return f
 }
 
 // ============ State Inspection ============
 
-// IsDone 原子检查，无锁，极大提高高并发下的轮询性能
 func (f *CompletableFuture[T]) IsDone() bool {
 	return atomic.LoadInt32(&f.state) == stateDone
 }
@@ -66,8 +79,6 @@ func (f *CompletableFuture[T]) IsCancelled() bool {
 	if !f.IsDone() {
 		return false
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	return f.err == ErrCanceled
 }
 
@@ -75,105 +86,136 @@ func (f *CompletableFuture[T]) IsCompletedExceptionally() bool {
 	if !f.IsDone() {
 		return false
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	return f.err != nil && f.err != ErrCanceled
 }
 
-// ResultNow 对应 Java 19: resultNow()
+// ============ Result Retrieval ============
+
 func (f *CompletableFuture[T]) ResultNow() T {
-	if !f.IsDone() {
+	if atomic.LoadInt32(&f.state) != stateDone {
 		panic("Future not completed")
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.err != nil {
 		panic(fmt.Sprintf("Future completed exceptionally: %v", f.err))
 	}
 	return f.value
 }
 
-// ExceptionNow 对应 Java 19: exceptionNow()
 func (f *CompletableFuture[T]) ExceptionNow() error {
-	if !f.IsDone() {
+	if atomic.LoadInt32(&f.state) != stateDone {
 		panic("Future not completed")
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.err == nil {
 		panic("Future completed normally")
 	}
 	return f.err
 }
 
-// GetNow 对应 Java: getNow(T valueIfAbsent)
 func (f *CompletableFuture[T]) GetNow(valueIfAbsent T) (T, error) {
-	if !f.IsDone() {
-		return valueIfAbsent, nil
+	if atomic.LoadInt32(&f.state) == stateDone {
+		return f.value, f.err
 	}
+	return valueIfAbsent, nil
+}
+
+func (f *CompletableFuture[T]) Join() (T, error) {
+	if atomic.LoadInt32(&f.state) == stateDone {
+		return f.value, f.err
+	}
+	<-f.getDoneChanLazy()
+	return f.value, f.err
+}
+
+func (f *CompletableFuture[T]) Get(ctx context.Context) (T, error) {
+	if atomic.LoadInt32(&f.state) == stateDone {
+		return f.value, f.err
+	}
+	select {
+	case <-ctx.Done():
+		var zero T
+		return zero, ctx.Err()
+	case <-f.getDoneChanLazy():
+		return f.value, f.err
+	}
+}
+
+// getDoneChanLazy 获取等待通道
+// 【核心修复】：解决 close of closed channel Panic，并实现 Zero Alloc
+func (f *CompletableFuture[T]) getDoneChanLazy() chan struct{} {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.value, f.err
+
+	// 如果已经存在（无论是谁创建的），直接返回
+	if f.doneChan != nil {
+		return f.doneChan
+	}
+
+	// 如果当前已经是 Done 状态，且 doneChan 还是 nil
+	// 说明 Complete 过程已经结束（或者正在结束且没创建 channel）
+	// 此时直接返回全局 closedChan，千万不要赋值给 f.doneChan，避免 finishCompletion 误关
+	if atomic.LoadInt32(&f.state) == stateDone {
+		return closedChan
+	}
+
+	// 只有在 Pending 状态下，才真正创建 channel
+	f.doneChan = make(chan struct{})
+	return f.doneChan
 }
 
 // ============ Completion Actions ============
 
 func (f *CompletableFuture[T]) Complete(val T) bool {
-	// 1. 快速原子检查
-	if atomic.LoadInt32(&f.state) == stateDone {
+	if !atomic.CompareAndSwapInt32(&f.state, statePending, stateCompleting) {
 		return false
 	}
-
-	f.mu.Lock()
-	// 2. 双重检查
-	if f.state == stateDone {
-		f.mu.Unlock()
-		return false
-	}
-
-	// 3. 修改状态
-	atomic.StoreInt32(&f.state, stateDone)
 	f.value = val
-	close(f.doneChan)
-	cbs := f.callbacks
-	f.callbacks = nil
-	f.mu.Unlock()
-
-	// 4. 触发回调
-	for _, cb := range cbs {
-		cb(val, nil)
-	}
+	f.finishCompletion()
 	return true
 }
 
 func (f *CompletableFuture[T]) CompleteExceptionally(err error) bool {
-	if atomic.LoadInt32(&f.state) == stateDone {
+	if !atomic.CompareAndSwapInt32(&f.state, statePending, stateCompleting) {
 		return false
 	}
-
-	f.mu.Lock()
-	if f.state == stateDone {
-		f.mu.Unlock()
-		return false
-	}
-
-	atomic.StoreInt32(&f.state, stateDone)
 	f.err = err
-	close(f.doneChan)
-	cbs := f.callbacks
-	f.callbacks = nil
-	f.mu.Unlock()
-
-	var zero T
-	for _, cb := range cbs {
-		cb(zero, err)
-	}
+	f.finishCompletion()
 	return true
 }
 
-// CompleteAsync 对应 Java 9: completeAsync(Supplier)
+func (f *CompletableFuture[T]) finishCompletion() {
+	atomic.StoreInt32(&f.state, stateDone)
+
+	f.mu.Lock()
+	// 只有当 channel 确实存在时才关闭
+	// 由于 getDoneChanLazy 对 Done 状态不再创建 channel，这里是安全的
+	if f.doneChan != nil {
+		close(f.doneChan)
+	}
+
+	cb0 := f.cb0
+	cbs := f.cbs
+	f.cb0 = nil
+	f.cbs = nil
+	f.mu.Unlock()
+
+	if cb0 != nil {
+		cb0(f.value, f.err)
+	}
+	for _, cb := range cbs {
+		cb(f.value, f.err)
+	}
+}
+
 func (f *CompletableFuture[T]) CompleteAsync(supplier func() T) *CompletableFuture[T] {
-	pool.GlobalExecutor.Submit(func() {
+	return f.CompleteAsyncWithExecutor(nil, supplier)
+}
+
+func (f *CompletableFuture[T]) CompleteAsyncWithExecutor(executor pool.Executor, supplier func() T) *CompletableFuture[T] {
+	exec := executor
+	if exec == nil {
+		exec = pool.GlobalExecutor
+	}
+	exec.Submit(func() {
 		res, err := safecall(func() T { return supplier() })
 		if err != nil {
 			f.CompleteExceptionally(err)
@@ -184,36 +226,48 @@ func (f *CompletableFuture[T]) CompleteAsync(supplier func() T) *CompletableFutu
 	return f
 }
 
-// ============ Waiting ============
-
-func (f *CompletableFuture[T]) Join() (T, error) {
-	<-f.doneChan
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.value, f.err
-}
-
-func (f *CompletableFuture[T]) Get(ctx context.Context) (T, error) {
-	select {
-	case <-ctx.Done():
-		var zero T
-		return zero, ctx.Err()
-	case <-f.doneChan:
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		return f.value, f.err
+func (f *CompletableFuture[T]) whenCompleteInternal(cb callback[T]) {
+	if atomic.LoadInt32(&f.state) == stateDone {
+		cb(f.value, f.err)
+		return
 	}
+
+	f.mu.Lock()
+	if atomic.LoadInt32(&f.state) == stateDone {
+		f.mu.Unlock()
+		cb(f.value, f.err)
+		return
+	}
+
+	if f.cb0 == nil {
+		f.cb0 = cb
+	} else {
+		if f.cbs == nil {
+			f.cbs = make([]callback[T], 0, 2)
+		}
+		f.cbs = append(f.cbs, cb)
+	}
+	f.mu.Unlock()
 }
 
-// ============ Obtrude (Forced completion) ============
+func (f *CompletableFuture[T]) Cancel(mayInterruptIfRunning bool) bool {
+	if !atomic.CompareAndSwapInt32(&f.state, statePending, stateCompleting) {
+		return false
+	}
+	f.err = ErrCanceled
+	if f.cancel != nil {
+		f.cancel()
+	}
+	f.finishCompletion()
+	return true
+}
 
 func (f *CompletableFuture[T]) ObtrudeValue(val T) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.value = val
 	f.err = nil
-	atomic.StoreInt32(&f.state, stateDone) // 强制标记完成
-	// 注意：Obtrude 不重新触发回调
+	atomic.StoreInt32(&f.state, stateDone)
 }
 
 func (f *CompletableFuture[T]) ObtrudeException(err error) {
@@ -223,29 +277,6 @@ func (f *CompletableFuture[T]) ObtrudeException(err error) {
 	f.value = zero
 	f.err = err
 	atomic.StoreInt32(&f.state, stateDone)
-}
-
-// ============ Internal Logic ============
-
-func (f *CompletableFuture[T]) whenCompleteInternal(cb callback[T]) {
-	// 优化：如果已经完成，直接回调，不加锁
-	if atomic.LoadInt32(&f.state) == stateDone {
-		f.mu.Lock()
-		v, e := f.value, f.err
-		f.mu.Unlock()
-		cb(v, e)
-		return
-	}
-
-	f.mu.Lock()
-	if f.state == stateDone {
-		v, e := f.value, f.err
-		f.mu.Unlock()
-		cb(v, e)
-		return
-	}
-	f.callbacks = append(f.callbacks, cb)
-	f.mu.Unlock()
 }
 
 func safecall[R any](fn func() R) (result R, err error) {

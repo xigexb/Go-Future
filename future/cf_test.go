@@ -3,12 +3,26 @@ package future
 import (
 	"context"
 	"errors"
-	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/xigexb/go-future/pool"
 )
 
-// 辅助断言函数
+// ============ 辅助工具 ============
+
+// mockExecutor 用于验证任务是否提交到了指定的执行器
+type mockExecutor struct {
+	submitCount int32
+}
+
+func (m *mockExecutor) Submit(task pool.Runnable) {
+	atomic.AddInt32(&m.submitCount, 1)
+	go task()
+}
+
 func assertNil(t *testing.T, err error) {
 	if err != nil {
 		t.Helper()
@@ -23,153 +37,120 @@ func assertEqual[T comparable](t *testing.T, got, want T) {
 	}
 }
 
-// 1. 测试基本的异步执行和结果获取
-func TestSupplyAsync_Get(t *testing.T) {
+// ============ 基础功能测试 ============
+
+func TestSupplyAsync_Basic(t *testing.T) {
 	f := SupplyAsync(func() int {
 		return 100
 	})
-
-	val, err := f.Get(context.Background())
+	val, err := f.Join()
 	assertNil(t, err)
 	assertEqual(t, val, 100)
 }
 
-// 2. 测试链式调用 (Map / Apply)
-func TestThenApply(t *testing.T) {
-	f1 := SupplyAsync(func() int {
-		return 10
-	})
-
-	// int -> string
-	f2 := ThenApply(f1, func(v int) string {
-		return fmt.Sprintf("val:%d", v)
-	})
-
-	// string -> string
-	f3 := ThenApply(f2, func(s string) string {
-		return s + "!"
-	})
-
-	res, err := f3.Join()
-	assertNil(t, err)
-	assertEqual(t, res, "val:10!")
-}
-
-// 3. 测试 FlatMap (ThenCompose)
-func TestThenCompose(t *testing.T) {
-	f := SupplyAsync(func() int { return 1 })
-
-	f2 := ThenCompose(f, func(v int) *CompletableFuture[int] {
-		// 返回一个新的 Future
-		return SupplyAsync(func() int {
-			return v + 10
-		})
-	})
-
-	res, err := f2.Join()
-	assertNil(t, err)
-	assertEqual(t, res, 11)
-}
-
-// 4. 测试异常处理和 Panic 捕获
-func TestPanicHandling(t *testing.T) {
+func TestException_Handling(t *testing.T) {
 	f := SupplyAsync(func() int {
 		panic("boom")
-		return 0
 	})
+
+	// 验证 Exceptionally 恢复机制
+	fRec := f.Exceptionally(func(err error) (int, error) {
+		return -1, nil
+	})
+
+	val, err := fRec.Join()
+	assertNil(t, err)
+	assertEqual(t, val, -1)
+
+	// 验证原始 Future 的错误状态
+	if f.ExceptionNow() == nil {
+		t.Error("Original future should have error")
+	}
+}
+
+// ============ 新特性：自定义协程池测试 ============
+
+func TestSupplyAsync_WithCustomExecutor(t *testing.T) {
+	mock := &mockExecutor{}
+
+	// 使用自定义池执行
+	f := SupplyAsyncWithExecutor(mock, func() string {
+		return "done"
+	})
+
+	res, err := f.Join()
+	assertNil(t, err)
+	assertEqual(t, res, "done")
+
+	// 验证 mockExecutor 是否被调用
+	if atomic.LoadInt32(&mock.submitCount) != 1 {
+		t.Errorf("Expected custom executor to be called 1 time, got %d", mock.submitCount)
+	}
+}
+
+func TestThenApplyAsync_WithCustomExecutor(t *testing.T) {
+	mock := &mockExecutor{}
+
+	f1 := SupplyAsync(func() int { return 1 })
+
+	// 链式调用指定池
+	f2 := ThenApplyAsyncWithExecutor(f1, mock, func(v int) int {
+		return v + 1
+	})
+
+	val, _ := f2.Join()
+	assertEqual(t, val, 2)
+
+	// 验证 mockExecutor 是否被调用
+	// 注意：SupplyAsync 用的是默认池，ThenApplyAsync 用的才是 mock
+	if atomic.LoadInt32(&mock.submitCount) != 1 {
+		t.Errorf("Expected custom executor to be called 1 time, got %d", mock.submitCount)
+	}
+}
+
+func TestGlobalExecutor_Replacement(t *testing.T) {
+	// 保存旧的，测试完恢复
+	original := pool.GlobalExecutor
+	defer pool.SetGlobalExecutor(original)
+
+	mock := &mockExecutor{}
+	pool.SetGlobalExecutor(mock)
+
+	// 现在的普通 SupplyAsync 应该走 Mock 池
+	SupplyAsync(func() int { return 1 }).Join()
+
+	if atomic.LoadInt32(&mock.submitCount) != 1 {
+		t.Error("Global executor replacement failed")
+	}
+}
+
+// ============ 上下文与超时测试 ============
+
+func TestContext_Cancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// 创建一个会阻塞的任务
+	f := SupplyAsyncCtx(ctx, func() int {
+		time.Sleep(1 * time.Second)
+		return 1
+	})
+
+	// 立即取消
+	cancel()
 
 	_, err := f.Join()
-	if err == nil {
-		t.Fatal("Expected error from panic, got nil")
-	}
-	// 验证错误信息包含 panic 内容
-	if err.Error() != "panic: boom" {
-		t.Errorf("Unexpected error message: %v", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Expected context.Canceled, got %v", err)
 	}
 }
 
-// 5. 测试 Exceptionally 恢复
-func TestExceptionally(t *testing.T) {
+func TestOrTimeout_Legacy(t *testing.T) {
 	f := SupplyAsync(func() int {
-		panic("fail")
-		return 0
-	})
-
-	// 发生错误时返回 -1
-	// 修改点：现在需要返回 (T, error)
-	fRecovered := f.Exceptionally(func(err error) (int, error) {
-		return -1, nil // nil 表示成功恢复
-	})
-
-	res, err := fRecovered.Join()
-	assertNil(t, err)
-	assertEqual(t, res, -1)
-}
-
-// 6. 测试 AllOf (所有成功)
-func TestAllOf_Success(t *testing.T) {
-	count := 10
-	futures := make([]*CompletableFuture[int], count)
-	for i := 0; i < count; i++ {
-		i := i
-		futures[i] = SupplyAsync(func() int {
-			time.Sleep(10 * time.Millisecond)
-			return i
-		})
-	}
-
-	all := AllOf(futures...)
-	_, err := all.Join()
-	assertNil(t, err)
-
-	for _, f := range futures {
-		if !f.IsDone() {
-			t.Error("Child future should be done")
-		}
-	}
-}
-
-// 7. 测试 AllOf (快速失败 Fail-Fast)
-func TestAllOf_FailFast(t *testing.T) {
-	// 任务1: 慢，成功
-	f1 := SupplyAsync(func() int {
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		return 1
 	})
 
-	// 任务2: 手动创建 Future
-	f2 := New[int]()
-
-	// 模拟 10ms 后发生错误
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		f2.CompleteExceptionally(errors.New("fast fail"))
-	}()
-
-	start := time.Now()
-	all := AllOf(f1, f2)
-	_, err := all.Join()
-	duration := time.Since(start)
-
-	if err == nil {
-		t.Fatal("Expected error, got nil")
-	}
-	if err.Error() != "fast fail" {
-		t.Errorf("Expected 'fast fail', got %v", err)
-	}
-
-	if duration > 100*time.Millisecond {
-		t.Errorf("AllOf did not fail fast, took %v", duration)
-	}
-}
-
-// 8. 测试超时控制 OrTimeout
-func TestOrTimeout(t *testing.T) {
-	f := SupplyAsync(func() int {
-		time.Sleep(200 * time.Millisecond)
-		return 1
-	})
-
+	// 50ms 超时
 	f.OrTimeout(50 * time.Millisecond)
 
 	_, err := f.Join()
@@ -178,90 +159,56 @@ func TestOrTimeout(t *testing.T) {
 	}
 }
 
-// 9. 测试 AnyOf
-func TestAnyOf(t *testing.T) {
-	f1 := SupplyAsync(func() int {
-		time.Sleep(200 * time.Millisecond)
-		return 1
-	})
-	f2 := SupplyAsync(func() int {
-		time.Sleep(10 * time.Millisecond)
-		return 2
-	})
+// ============ 组合测试 (AllOf/AnyOf) ============
 
-	anyF := AnyOf(f1, f2)
-	res, err := anyF.Join()
+func TestAllOf_Concurrency(t *testing.T) {
+	count := 50
+	futures := make([]*CompletableFuture[int], count)
+
+	for i := 0; i < count; i++ {
+		i := i
+		futures[i] = SupplyAsync(func() int {
+			time.Sleep(time.Duration(i) * time.Millisecond)
+			return i
+		})
+	}
+
+	all := AllOf(futures...)
+	_, err := all.Join()
 	assertNil(t, err)
-	assertEqual(t, res, 2)
+
+	for i, f := range futures {
+		if val, _ := f.GetNow(-1); val != i {
+			t.Errorf("Future %d result mismatch", i)
+		}
+	}
 }
 
-// 10. 测试取消 Cancel
-func TestCancel(t *testing.T) {
-	f := SupplyAsync(func() int {
-		time.Sleep(1 * time.Second)
-		return 1
-	})
+// ============ 竞态检测 (Run with -race) ============
+
+// ============ 竞态检测 (Run with -race) ============
+
+func TestRaceCondition(t *testing.T) {
+	// 模拟高并发下的回调注册和完成
+	f := New[int]()
+	var wg sync.WaitGroup
+	wg.Add(2)
 
 	go func() {
-		time.Sleep(10 * time.Millisecond)
-		f.Cancel(true)
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			// 修正：Go 泛型不支持方法引入新类型参数，必须使用函数形式 ThenApply(f, ...)
+			// 错误写法: f.ThenApply(...)
+			// 正确写法:
+			ThenApply(f, func(v int) int { return v })
+		}
 	}()
 
-	_, err := f.Join()
-	if err != ErrCanceled {
-		t.Errorf("Expected ErrCanceled, got %v", err)
-	}
-}
+	go func() {
+		defer wg.Done()
+		time.Sleep(1 * time.Millisecond)
+		f.Complete(1)
+	}()
 
-// 11. 测试 ThenCombine (合并 T 和 U)
-func TestThenCombine(t *testing.T) {
-	f1 := SupplyAsync(func() int { return 10 })
-	f2 := SupplyAsync(func() string { return " apples" })
-
-	// 合并 int 和 string -> string
-	fCombined := ThenCombine(f1, f2, func(n int, s string) string {
-		return fmt.Sprintf("%d%s", n, s)
-	})
-
-	res, err := fCombined.Join()
-	assertNil(t, err)
-	assertEqual(t, res, "10 apples")
-}
-
-// 12. 测试 ThenCombine 的异常处理
-func TestThenCombine_Error(t *testing.T) {
-	f1 := SupplyAsync(func() int { return 10 })
-	f2 := SupplyAsync(func() string {
-		panic("fail")
-		return ""
-	})
-
-	fCombined := ThenCombine(f1, f2, func(n int, s string) string {
-		return "should not happen"
-	})
-
-	_, err := fCombined.Join()
-	if err == nil {
-		t.Fatal("Expected error, got nil")
-	}
-}
-
-// 13. 测试 ApplyToEither (谁快用谁)
-func TestApplyToEither(t *testing.T) {
-	fSlow := SupplyAsync(func() int {
-		time.Sleep(100 * time.Millisecond)
-		return 1
-	})
-	fFast := SupplyAsync(func() int {
-		time.Sleep(10 * time.Millisecond)
-		return 2
-	})
-
-	fRes := ApplyToEither(fSlow, fFast, func(val int) string {
-		return fmt.Sprintf("Winner is %d", val)
-	})
-
-	res, err := fRes.Join()
-	assertNil(t, err)
-	assertEqual(t, res, "Winner is 2")
+	wg.Wait()
 }

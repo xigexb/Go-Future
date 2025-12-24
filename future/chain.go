@@ -6,21 +6,24 @@ import (
 	"github.com/xigexb/go-future/pool"
 )
 
-// ============ 1. ThenApply (Map: T -> V) ============
+// ============ 1. ThenApply ============
 
-// ThenApply 同步执行转换
 func ThenApply[T any, V any](src *CompletableFuture[T], fn func(T) V) *CompletableFuture[V] {
-	return uniApply(src, fn, false)
+	return uniApply(src, fn, false, nil)
 }
 
-// ThenApplyAsync 异步执行转换
 func ThenApplyAsync[T any, V any](src *CompletableFuture[T], fn func(T) V) *CompletableFuture[V] {
-	return uniApply(src, fn, true)
+	return uniApply(src, fn, true, nil)
 }
 
-func uniApply[T any, V any](src *CompletableFuture[T], fn func(T) V, async bool) *CompletableFuture[V] {
+func ThenApplyAsyncWithExecutor[T any, V any](src *CompletableFuture[T], executor pool.Executor, fn func(T) V) *CompletableFuture[V] {
+	return uniApply(src, fn, true, executor)
+}
+
+func uniApply[T any, V any](src *CompletableFuture[T], fn func(T) V, async bool, executor pool.Executor) *CompletableFuture[V] {
 	dest := New[V]()
-	src.whenCompleteInternal(func(val T, err error) {
+
+	execTask := func(val T, err error) {
 		if err != nil {
 			dest.CompleteExceptionally(err)
 			return
@@ -34,15 +37,26 @@ func uniApply[T any, V any](src *CompletableFuture[T], fn func(T) V, async bool)
 			}
 		}
 		if async {
-			pool.GlobalExecutor.Submit(task)
+			exec := executor
+			if exec == nil {
+				exec = pool.GlobalExecutor
+			}
+			exec.Submit(task)
 		} else {
 			task()
 		}
-	})
+	}
+
+	// 快速路径优化：如果上游已经完成，且不需要异步切换，直接执行
+	if src.IsDone() {
+		execTask(src.value, src.err)
+	} else {
+		src.whenCompleteInternal(execTask)
+	}
 	return dest
 }
 
-// ============ 2. ThenAccept (Consumer: T -> Void) ============
+// ============ 2. ThenAccept ============
 
 func (f *CompletableFuture[T]) ThenAccept(fn func(T)) *CompletableFuture[struct{}] {
 	return ThenApply(f, func(v T) struct{} { fn(v); return struct{}{} })
@@ -52,7 +66,11 @@ func (f *CompletableFuture[T]) ThenAcceptAsync(fn func(T)) *CompletableFuture[st
 	return ThenApplyAsync(f, func(v T) struct{} { fn(v); return struct{}{} })
 }
 
-// ============ 3. ThenRun (Runnable: Void -> Void) ============
+func (f *CompletableFuture[T]) ThenAcceptAsyncWithExecutor(executor pool.Executor, fn func(T)) *CompletableFuture[struct{}] {
+	return ThenApplyAsyncWithExecutor(f, executor, func(v T) struct{} { fn(v); return struct{}{} })
+}
+
+// ============ 3. ThenRun ============
 
 func (f *CompletableFuture[T]) ThenRun(action func()) *CompletableFuture[struct{}] {
 	return ThenApply(f, func(_ T) struct{} { action(); return struct{}{} })
@@ -62,19 +80,28 @@ func (f *CompletableFuture[T]) ThenRunAsync(action func()) *CompletableFuture[st
 	return ThenApplyAsync(f, func(_ T) struct{} { action(); return struct{}{} })
 }
 
-// ============ 4. ThenCompose (FlatMap: T -> Future[V]) ============
+func (f *CompletableFuture[T]) ThenRunAsyncWithExecutor(executor pool.Executor, action func()) *CompletableFuture[struct{}] {
+	return ThenApplyAsyncWithExecutor(f, executor, func(_ T) struct{} { action(); return struct{}{} })
+}
+
+// ============ 4. ThenCompose ============
 
 func ThenCompose[T any, V any](src *CompletableFuture[T], fn func(T) *CompletableFuture[V]) *CompletableFuture[V] {
-	return uniCompose(src, fn, false)
+	return uniCompose(src, fn, false, nil)
 }
 
 func ThenComposeAsync[T any, V any](src *CompletableFuture[T], fn func(T) *CompletableFuture[V]) *CompletableFuture[V] {
-	return uniCompose(src, fn, true)
+	return uniCompose(src, fn, true, nil)
 }
 
-func uniCompose[T any, V any](src *CompletableFuture[T], fn func(T) *CompletableFuture[V], async bool) *CompletableFuture[V] {
+func ThenComposeAsyncWithExecutor[T any, V any](src *CompletableFuture[T], executor pool.Executor, fn func(T) *CompletableFuture[V]) *CompletableFuture[V] {
+	return uniCompose(src, fn, true, executor)
+}
+
+func uniCompose[T any, V any](src *CompletableFuture[T], fn func(T) *CompletableFuture[V], async bool, executor pool.Executor) *CompletableFuture[V] {
 	dest := New[V]()
-	src.whenCompleteInternal(func(val T, err error) {
+
+	execTask := func(val T, err error) {
 		if err != nil {
 			dest.CompleteExceptionally(err)
 			return
@@ -91,36 +118,62 @@ func uniCompose[T any, V any](src *CompletableFuture[T], fn func(T) *Completable
 				dest.CompleteExceptionally(ErrNilFunction)
 				return
 			}
-			relay.whenCompleteInternal(func(v V, e error) {
+
+			// Relay 也可以走快速路径
+			if relay.IsDone() {
+				v, e := relay.value, relay.err
 				if e != nil {
 					dest.CompleteExceptionally(e)
 				} else {
 					dest.Complete(v)
 				}
-			})
+			} else {
+				relay.whenCompleteInternal(func(v V, e error) {
+					if e != nil {
+						dest.CompleteExceptionally(e)
+					} else {
+						dest.Complete(v)
+					}
+				})
+			}
 		}
 		if async {
-			pool.GlobalExecutor.Submit(task)
+			exec := executor
+			if exec == nil {
+				exec = pool.GlobalExecutor
+			}
+			exec.Submit(task)
 		} else {
 			task()
 		}
-	})
+	}
+
+	if src.IsDone() {
+		execTask(src.value, src.err)
+	} else {
+		src.whenCompleteInternal(execTask)
+	}
 	return dest
 }
 
-// ============ 5. WhenComplete (Peeking) ============
+// ============ 5. WhenComplete ============
 
 func (f *CompletableFuture[T]) WhenComplete(action func(T, error)) *CompletableFuture[T] {
-	return uniWhenComplete(f, action, false)
+	return uniWhenComplete(f, action, false, nil)
 }
 
 func (f *CompletableFuture[T]) WhenCompleteAsync(action func(T, error)) *CompletableFuture[T] {
-	return uniWhenComplete(f, action, true)
+	return uniWhenComplete(f, action, true, nil)
 }
 
-func uniWhenComplete[T any](src *CompletableFuture[T], action func(T, error), async bool) *CompletableFuture[T] {
+func (f *CompletableFuture[T]) WhenCompleteAsyncWithExecutor(executor pool.Executor, action func(T, error)) *CompletableFuture[T] {
+	return uniWhenComplete(f, action, true, executor)
+}
+
+func uniWhenComplete[T any](src *CompletableFuture[T], action func(T, error), async bool, executor pool.Executor) *CompletableFuture[T] {
 	dest := New[T]()
-	src.whenCompleteInternal(func(val T, err error) {
+
+	execTask := func(val T, err error) {
 		task := func() {
 			func() {
 				defer func() { recover() }()
@@ -133,10 +186,20 @@ func uniWhenComplete[T any](src *CompletableFuture[T], action func(T, error), as
 			}
 		}
 		if async {
-			pool.GlobalExecutor.Submit(task)
+			exec := executor
+			if exec == nil {
+				exec = pool.GlobalExecutor
+			}
+			exec.Submit(task)
 		} else {
 			task()
 		}
-	})
+	}
+
+	if src.IsDone() {
+		execTask(src.value, src.err)
+	} else {
+		src.whenCompleteInternal(execTask)
+	}
 	return dest
 }
